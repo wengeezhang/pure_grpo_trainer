@@ -1,0 +1,18 @@
+[project]
+name = "pure-grpo-trainer"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "zhangrongjie.123",email = "zhangrongjie.123@bytedance.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+]
+
+[tool.poetry]
+packages = [{include = "pure_grpo_trainer", from = "src"}]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
