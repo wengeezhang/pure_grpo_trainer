@@ -1,10 +1,11 @@
 import torch
 from torch.utils.data import DataLoader
 
-from transformers import Trainer, PreTrainedModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import Trainer, PreTrainedModel, AutoModelForCausalLM, AutoTokenizer, TrainerState
 from datasets import Dataset
 from typing import Union, Optional
 from pure_grpo_trainer.trainer.config import GRPOConfig
+from pure_grpo_trainer.trainer.utils import get_last_checkpoint
 
 
 def empty_data_collator(x):
@@ -74,14 +75,34 @@ class GRPOTrainer(Trainer):
 
     def train(
             self,
-            resume_from_checkpoint: Optional[Union[str, bool]] = None,
+            resume_from_checkpoint: Optional[bool] = None,
             **kwargs
     ):
         print("Starting training...")
         # prepare dataloader
         train_dataloader = self.get_train_dataloader(self.train_dataset)
         if self.args.use_eval is True:
-            eval_dataloader = self.get_eval_dataloader()
+            eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
+
+        # resume from checkpoint
+        # resume_from_checkpoint is just a flag to show whether to use checkpoint.
+        # the checkpoint_save_dir of last checkpoint is set in kwargs.
+        if isinstance(resume_from_checkpoint, bool) and resume_from_checkpoint:
+            checkpoint_save_dir = kwargs.get("checkpoint_save_dir", None)
+            checkpoint_path = get_last_checkpoint(checkpoint_save_dir)
+            if checkpoint_path is None:
+                raise ValueError("No checkpoint found in the checkpoint_save_dir.")
+
+            # load checkpoint if not fsdp or deepspeed
+            if not self.is_fsdp_enabled:
+                self._load_from_checkpoint(checkpoint_path)
+        # get tp_size
+        # todo tp_size is model parallel
+
+        # training
+        # init state
+        self.state = TrainerState()
+        self.state.train_batch_size = self._train_batch_size
 
     def get_train_dataloader(
             self,
