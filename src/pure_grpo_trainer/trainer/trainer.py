@@ -1,9 +1,14 @@
 import torch
+from torch.utils.data import DataLoader
 
 from transformers import Trainer, PreTrainedModel, AutoModelForCausalLM, AutoTokenizer
 from datasets import Dataset
 from typing import Union, Optional
 from pure_grpo_trainer.trainer.config import GRPOConfig
+
+
+def empty_data_collator(x):
+    return x
 
 
 class GRPOTrainer(Trainer):
@@ -87,6 +92,12 @@ class GRPOTrainer(Trainer):
         dataloader_params = {
             # self.args.train_batch_size is per_device_batch_size * max(1, self.n_gpu)
             "batch_size": self.args.train_batch_size * self.args.generation_cover_steps,
-            "shuffle": True,
-            "drop_last": True,
+            "collate_fn": empty_data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
         }
+        dataloader = DataLoader(dataset, **dataloader_params)
+        return self.accelerator.prepare(dataloader)
+
+
