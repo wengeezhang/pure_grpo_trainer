@@ -5,6 +5,28 @@ from transformers import TrainingArguments
 
 
 class GRPOConfig(TrainingArguments):
+    generation_cover_steps: int = field(
+        default=None,
+        metadata={
+            "help": (
+                "The number of steps one generation samples can cover. "
+                "e.g. if per_device_eval_batch_size=10, which means one step need 10 samples. "
+                "if we want cover 10 steps in one generation, "
+                "we need 100 (per_device_eval_batch_size * generation_cover_steps) samples. "
+                "so this arg is used to calculate the `generation_batch_size` which is not set by user. "
+                "If not set, it will be calculated by `generation_batch_size / per_device_eval_batch_size`."
+            )
+        }
+    )
+    generation_batch_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "The batch size for one generation. "
+                "it can not be set by user, only calculated by `per_device_eval_batch_size * generation_cover_steps`. "
+            )
+        }
+    )
     reward_weights: Optional[List[float]] = field(
         default=None,
         metadata={
@@ -64,6 +86,15 @@ class GRPOConfig(TrainingArguments):
                 "The eval strategy. "
                 "must be provided if use_eval is True. "
                 "e.g. {'steps': 512} or {'epochs': 1}"
+            )
+        }
+    )
+    save_checkpoint_strategy: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "help": (
+                "The checkpoint strategy. "
+                "e.g. ['new_best_eval', 'epochs']"
             )
         }
     )

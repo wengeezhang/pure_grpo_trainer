@@ -69,15 +69,24 @@ class GRPOTrainer(Trainer):
 
     def train(
             self,
+            resume_from_checkpoint: Optional[Union[str, bool]] = None,
             **kwargs
     ):
         print("Starting training...")
         # prepare dataloader
-        train_dataloader = self.get_train_dataloader()
-        eval_dataloader = self.get_eval_dataloader()
+        train_dataloader = self.get_train_dataloader(self.train_dataset)
+        if self.args.use_eval is True:
+            eval_dataloader = self.get_eval_dataloader()
 
     def get_train_dataloader(
             self,
             dataset: Dataset = None,
     ):
         print("Starting training dataloader...")
+
+        dataloader_params = {
+            # self.args.train_batch_size is per_device_batch_size * max(1, self.n_gpu)
+            "batch_size": self.args.train_batch_size * self.args.generation_cover_steps,
+            "shuffle": True,
+            "drop_last": True,
+        }
