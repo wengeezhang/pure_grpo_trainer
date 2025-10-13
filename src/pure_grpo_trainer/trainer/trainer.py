@@ -1,7 +1,9 @@
+import math
 import os
+from collections.abc import Sized
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from transformers import Trainer, PreTrainedModel, AutoModelForCausalLM, AutoTokenizer, TrainerState
 from datasets import Dataset
@@ -15,6 +17,59 @@ def empty_data_collator(x):
 
 
 TRAINER_STATE_NAME = "trainer_state.json"
+
+
+class RepeatSampler(Sampler):
+    """
+    this is copy from huggingface trl GRPOTrainer RepeatSampler class without any changes.
+    """
+
+    def __init__(
+        self,
+        data_source: Sized,
+        mini_repeat_count: int,
+        batch_size: int = 1,
+        repeat_count: int = 1,
+        shuffle: bool = True,
+        seed: Optional[int] = None,
+    ):
+        self.data_source = data_source
+        self.mini_repeat_count = mini_repeat_count
+        self.batch_size = batch_size
+        self.repeat_count = repeat_count
+        self.num_samples = len(data_source)
+        self.shuffle = shuffle
+        self.seed = seed
+
+        if shuffle:
+            self.generator = torch.Generator()  # Create a local random generator
+            if seed is not None:
+                self.generator.manual_seed(seed)
+
+    def __iter__(self):
+        if self.shuffle:
+            # E.g., [2, 4, 3, 1, 0, 6, 5] (num_samples = 7)
+            indexes = torch.randperm(self.num_samples, generator=self.generator).tolist()
+        else:
+            indexes = list(range(self.num_samples))
+
+        #    [2, 4, 3, 1, 0, 6, 5]
+        # -> [[2, 4, 3], [1, 0, 6], [5]]  (batch_size = 3)
+        indexes = [indexes[i : i + self.batch_size] for i in range(0, len(indexes), self.batch_size)]
+
+        #    [[2, 4, 3], [1, 0, 6], [5]]
+        # -> [[2, 4, 3], [1, 0, 6]]
+        indexes = [chunk for chunk in indexes if len(chunk) == self.batch_size]
+
+        for chunk in indexes:
+            for _ in range(self.repeat_count):
+                for index in chunk:
+                    for _ in range(self.mini_repeat_count):
+                        yield index
+
+    def __len__(self) -> int:
+        return self.num_samples * self.mini_repeat_count * self.repeat_count
+
 
 class GRPOTrainer(Trainer):
     def __init__(
@@ -116,7 +171,14 @@ class GRPOTrainer(Trainer):
 
         # start training
         print("***** Running training *****")
+        train_step = -1
+        update_step = -1
         self.state.epoch = 0
+        epochs_trained = 0
+        steps_in_current_epoch = 0
+        dataloader_len = len(train_dataloader)
+        total_steps_in_one_epoch = dataloader_len
+        update_num_per_epoch = dataloader_len // self.args.gradient_accumulation_steps + int(dataloader_len % self.args.gradient_accumulation_steps > 0)
 
         if resume_from_checkpoint is not None and resume_from_checkpoint and os.path.isfile(
             os.path.join(checkpoint_path, TRAINER_STATE_NAME)
@@ -124,7 +186,23 @@ class GRPOTrainer(Trainer):
             self.state = TrainerState.load_from_json(os.path.join(checkpoint_path, TRAINER_STATE_NAME))
             self.compare_trainer_and_checkpoint_args(self.args, self.state)
             self._load_callback_state()
-            epochs_trained = int(self.state.global_step // num_update_steps_per_epoch)
+            epochs_trained = int(self.state.global_step // update_num_per_epoch)
+            steps_trained_in_current_epoch = (self.state.global_step % update_num_per_epoch) * self.args.gradient_accumulation_steps
+
+        # clear weight grad
+        self.model.zero_grad()
+
+        # start train loop
+        for epoch in range(epochs_trained, math.ceil(self.args.num_train_epochs)):
+            epoch_dataloader = train_dataloader
+            epoch_iterator = iter(epoch_dataloader)
+            if hasattr(epoch_dataloader, "set_epoch"):
+                epoch_dataloader.set_epoch(epoch)
+
+            for _ in range(update_num_per_epoch):
+                update_step += 1
+                # todo 这里直接是可以服用底层 get_batch_samples，不过后面可以看看，是否在这个文件直接重新定义一个 get_batch_samples
+                batch_samples = self.get_batch_samples(epoch_iterator, self.args.gradient_accumulation_steps, self.args.device)
 
     def get_train_dataloader(
             self,
@@ -139,8 +217,21 @@ class GRPOTrainer(Trainer):
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
             "persistent_workers": self.args.dataloader_persistent_workers,
+            "sampler": self._get_train_sampler(),
         }
         dataloader = DataLoader(dataset, **dataloader_params)
         return self.accelerator.prepare(dataloader)
 
+    def _get_train_sampler(self, dataset: Dataset = None):
+        if dataset is None:
+            dataset = self.train_dataset
+
+        return RepeatSampler(
+            data_source=dataset,
+            mini_repeat_count=self.args.group_size,
+            batch_size=self.args.generation_batch_size // self.args.group_size,
+            repeat_count=self.args.generation_repeat_num * self.args.generation_cover_steps,
+            shuffle=self.shuffle_dataset,
+            seed=self.args.seed,
+        )
 

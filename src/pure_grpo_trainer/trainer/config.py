@@ -5,6 +5,23 @@ from transformers import TrainingArguments
 
 
 class GRPOConfig(TrainingArguments):
+    group_size: int = field(
+        default=8,
+        metadata={
+            "help": (
+                "The group size for the GRPO. "
+            )
+        }
+    )
+    generation_repeat_num: int = field(
+        default=2,
+        metadata={
+            "help": (
+                "The number of iterations for the generation. "
+                "that means one generation will be used `generation_repeat_num` times."
+            )
+        }
+    )
     generation_cover_steps: int = field(
         default=None,
         metadata={
