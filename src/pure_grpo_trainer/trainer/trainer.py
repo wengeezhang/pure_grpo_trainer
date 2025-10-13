@@ -19,9 +19,9 @@ def empty_data_collator(x):
 TRAINER_STATE_NAME = "trainer_state.json"
 
 
-class RepeatSampler(Sampler):
+class GRPOSampler(Sampler):
     """
-    this is copy from huggingface trl GRPOTrainer RepeatSampler class without any changes.
+
     """
 
     def __init__(
@@ -226,7 +226,7 @@ class GRPOTrainer(Trainer):
         if dataset is None:
             dataset = self.train_dataset
 
-        return RepeatSampler(
+        return GRPOSampler(
             data_source=dataset,
             mini_repeat_count=self.args.group_size,
             batch_size=self.args.generation_batch_size // self.args.group_size,
