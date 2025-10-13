@@ -1,3 +1,5 @@
+import os
+
 import torch
 from torch.utils.data import DataLoader
 
@@ -11,6 +13,8 @@ from pure_grpo_trainer.trainer.utils import get_last_checkpoint
 def empty_data_collator(x):
     return x
 
+
+TRAINER_STATE_NAME = "trainer_state.json"
 
 class GRPOTrainer(Trainer):
     def __init__(
@@ -87,6 +91,7 @@ class GRPOTrainer(Trainer):
         # resume from checkpoint
         # resume_from_checkpoint is just a flag to show whether to use checkpoint.
         # the checkpoint_save_dir of last checkpoint is set in kwargs.
+        checkpoint_path = ""
         if isinstance(resume_from_checkpoint, bool) and resume_from_checkpoint:
             checkpoint_save_dir = kwargs.get("checkpoint_save_dir", None)
             checkpoint_path = get_last_checkpoint(checkpoint_save_dir)
@@ -99,10 +104,27 @@ class GRPOTrainer(Trainer):
         # get tp_size
         # todo tp_size is model parallel
 
-        # training
         # init state
         self.state = TrainerState()
         self.state.train_batch_size = self._train_batch_size
+
+        # wrap fsdp/fsdp2
+        most_external_model = self.model_wrapped
+        self.model = self._wrap_model(most_external_model)
+
+        # prepare optimizer and lr_scheduler
+
+        # start training
+        print("***** Running training *****")
+        self.state.epoch = 0
+
+        if resume_from_checkpoint is not None and resume_from_checkpoint and os.path.isfile(
+            os.path.join(checkpoint_path, TRAINER_STATE_NAME)
+        ):
+            self.state = TrainerState.load_from_json(os.path.join(checkpoint_path, TRAINER_STATE_NAME))
+            self.compare_trainer_and_checkpoint_args(self.args, self.state)
+            self._load_callback_state()
+            epochs_trained = int(self.state.global_step // num_update_steps_per_epoch)
 
     def get_train_dataloader(
             self,
