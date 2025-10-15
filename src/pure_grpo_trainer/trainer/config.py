@@ -31,7 +31,6 @@ class GRPOConfig(TrainingArguments):
                 "if we want cover 10 steps in one generation, "
                 "we need 100 (per_device_eval_batch_size * generation_cover_steps) samples. "
                 "so this arg is used to calculate the `generation_batch_size` which is not set by user. "
-                "If not set, it will be calculated by `generation_batch_size / per_device_eval_batch_size`."
             )
         }
     )

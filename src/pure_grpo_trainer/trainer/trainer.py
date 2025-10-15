@@ -27,16 +27,16 @@ class GRPOSampler(Sampler):
     def __init__(
         self,
         data_source: Sized,
-        mini_repeat_count: int,
-        batch_size: int = 1,
-        repeat_count: int = 1,
+        group_size: int,
+        distinct_batch_size: int = 1,
+        generation_total_steps: int = 1,
         shuffle: bool = True,
         seed: Optional[int] = None,
     ):
         self.data_source = data_source
-        self.mini_repeat_count = mini_repeat_count
-        self.batch_size = batch_size
-        self.repeat_count = repeat_count
+        self.group_size = group_size
+        self.distinct_batch_size = distinct_batch_size
+        self.generation_total_steps = generation_total_steps
         self.num_samples = len(data_source)
         self.shuffle = shuffle
         self.seed = seed
@@ -54,21 +54,21 @@ class GRPOSampler(Sampler):
             indexes = list(range(self.num_samples))
 
         #    [2, 4, 3, 1, 0, 6, 5]
-        # -> [[2, 4, 3], [1, 0, 6], [5]]  (batch_size = 3)
-        indexes = [indexes[i : i + self.batch_size] for i in range(0, len(indexes), self.batch_size)]
+        # -> [[2, 4, 3], [1, 0, 6], [5]]  (distinct_batch_size = 3)
+        indexes = [indexes[i : i + self.distinct_batch_size] for i in range(0, len(indexes), self.distinct_batch_size)]
 
         #    [[2, 4, 3], [1, 0, 6], [5]]
         # -> [[2, 4, 3], [1, 0, 6]]
-        indexes = [chunk for chunk in indexes if len(chunk) == self.batch_size]
+        indexes = [chunk for chunk in indexes if len(chunk) == self.distinct_batch_size]
 
         for chunk in indexes:
-            for _ in range(self.repeat_count):
+            for _ in range(self.generation_total_steps):
                 for index in chunk:
-                    for _ in range(self.mini_repeat_count):
+                    for _ in range(self.group_size):
                         yield index
 
     def __len__(self) -> int:
-        return self.num_samples * self.mini_repeat_count * self.repeat_count
+        return self.num_samples * self.group_size * self.generation_total_steps
 
 
 class GRPOTrainer(Trainer):
@@ -228,9 +228,9 @@ class GRPOTrainer(Trainer):
 
         return GRPOSampler(
             data_source=dataset,
-            mini_repeat_count=self.args.group_size,
-            batch_size=self.args.generation_batch_size // self.args.group_size,
-            repeat_count=self.args.generation_repeat_num * self.args.generation_cover_steps,
+            group_size=self.args.group_size,
+            distinct_batch_size=self.args.generation_batch_size // self.args.group_size,
+            generation_total_steps=self.args.generation_repeat_num * self.args.generation_cover_steps,
             shuffle=self.shuffle_dataset,
             seed=self.args.seed,
         )
