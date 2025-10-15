@@ -4,7 +4,7 @@ a pure grpo trainer for huggingface transformers models
 声明式训练，避免在代码逻辑中嵌入训练细节。
 
 # 训练采样模式
-![grpo_sample_img](./img/grpo_sample.png)
+![grpo_sample_img](./img/grpo_sample_show.png)
 
 # 限制
 * only support pytorch
