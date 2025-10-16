@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, Sampler
 
 from transformers import Trainer, PreTrainedModel, AutoModelForCausalLM, AutoTokenizer, TrainerState
 from datasets import Dataset
-from typing import Union, Optional
+from typing import Union, Optional, Any
 from pure_grpo_trainer.trainer.config import GRPOConfig
 from pure_grpo_trainer.trainer.utils import get_last_checkpoint
 
@@ -92,6 +92,8 @@ class GRPOTrainer(Trainer):
         self.processing_class = processing_class
         self.optimizer = optimizer
         self.scheduler = scheduler
+        self.step_in_generation = 0
+        self._buffered_generation = None
 
         # prepare GRPOConfig
         if args is None:
@@ -171,6 +173,7 @@ class GRPOTrainer(Trainer):
 
         # start training
         print("***** Running training *****")
+        train_total_loss = torch.tensor(0.0, device=self.args.device)
         train_step = -1
         update_step = -1
         self.state.epoch = 0
@@ -202,7 +205,60 @@ class GRPOTrainer(Trainer):
             for _ in range(update_num_per_epoch):
                 update_step += 1
                 # todo 这里直接是可以服用底层 get_batch_samples，不过后面可以看看，是否在这个文件直接重新定义一个 get_batch_samples
-                batch_samples = self.get_batch_samples(epoch_iterator, self.args.gradient_accumulation_steps, self.args.device)
+                batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, self.args.gradient_accumulation_steps, self.args.device)
+                for i, batch_inputs in enumerate(batch_samples):
+                    train_step += 1
+                    will_update_in_this_step = (train_step + 1) % self.args.gradient_accumulation_steps == 0 or (train_step + 1) == total_steps_in_one_epoch
+                    # todo: accelerator _set_sync_gradients ?
+
+                    # 设置训练进度
+                    train_step_loss = self._do_train_step(batch_inputs)
+                    train_total_loss = train_total_loss + train_step_loss
+                    if will_update_in_this_step:
+                        print("Updating model...")
+
+    def _do_train_step(self, inputs: dict[str, Union[torch.Tensor, Any]]):
+        print("Starting training...")
+        self.model.train()
+        if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+            self.optimizer.train()
+        # first generation
+        # here generation_outputs include self.args.generation_cover_steps * self.args.per_device_batch_size examples
+        generation_outputs = self.generate(inputs)
+        # second get train_batch_size samples
+        # here one_batch_generation_outputs include self.args.per_device_batch_size examples
+        one_batch_generation_outputs = self.get_one_batch_from_generation_output(generation_outputs)
+
+        # third compute loss
+        self.compute_loss(one_batch_generation_outputs)
+        return 0
+
+    def generate(self, inputs: dict[str, Union[torch.Tensor, Any]], **kwargs):
+        print("Starting generation...")
+        mode = "train" if self.model.training else "eval"
+        if mode == "train":
+            repeat_train_steps_per_generation = self.args.num_iterations * self.args.generation_cover_steps
+            if self.step_in_generation % repeat_train_steps_per_generation == 0 or self._buffered_generation is None:
+                # todo _generate
+                generation_outputs = self._generate(inputs, **kwargs)
+                # todo: _shuffle_generation_outputs
+                shuffled_generation_outputs = self._shuffle_generation_outputs(generation_outputs)
+                # todo: _split_generation_outputs
+                self._buffered_generation = self._split_generation_outputs(shuffled_generation_outputs)
+            self.step_in_generation += 1
+            return self._buffered_generation
+        else:
+            return self._generate(inputs, **kwargs)
+
+    def get_one_batch_from_generation_output(self, generation_outputs):
+        mode = "train" if self.model.training else "eval"
+        if mode == "train":
+            generation_output = generation_outputs[self.step_in_generation % self.args.generation_cover_steps]
+            return generation_output
+        else:
+            return generation_outputs
+    def compute_loss(self, inputs: dict[str, Union[torch.Tensor, Any]], **kwargs):
+        print("Starting generation...")
 
     def get_train_dataloader(
             self,
@@ -234,4 +290,3 @@ class GRPOTrainer(Trainer):
             shuffle=self.shuffle_dataset,
             seed=self.args.seed,
         )
-
