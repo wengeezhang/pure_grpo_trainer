@@ -9,7 +9,7 @@ from transformers import Trainer, PreTrainedModel, AutoModelForCausalLM, AutoTok
 from datasets import Dataset
 from typing import Union, Optional, Any
 from pure_grpo_trainer.trainer.config import GRPOConfig
-from pure_grpo_trainer.trainer.utils import get_last_checkpoint
+from pure_grpo_trainer.trainer.utils import get_last_checkpoint, maybe_apply_chat_template, selective_log_softmax
 
 
 def empty_data_collator(x):
@@ -204,7 +204,7 @@ class GRPOTrainer(Trainer):
 
             for _ in range(update_num_per_epoch):
                 update_step += 1
-                # todo 这里直接是可以服用底层 get_batch_samples，不过后面可以看看，是否在这个文件直接重新定义一个 get_batch_samples
+                # todo 这里直接是可以复用底层 get_batch_samples，不过后面可以看看，是否在这个文件直接重新定义一个 get_batch_samples
                 batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, self.args.gradient_accumulation_steps, self.args.device)
                 for i, batch_inputs in enumerate(batch_samples):
                     train_step += 1
@@ -212,12 +212,14 @@ class GRPOTrainer(Trainer):
                     # todo: accelerator _set_sync_gradients ?
 
                     # 设置训练进度
+
+                    # 开始一步训练：train_step
                     train_step_loss = self._do_train_step(batch_inputs)
                     train_total_loss = train_total_loss + train_step_loss
                     if will_update_in_this_step:
                         print("Updating model...")
 
-    def _do_train_step(self, inputs: dict[str, Union[torch.Tensor, Any]]):
+    def _do_train_step(self, inputs: list[dict[str, Union[torch.Tensor, Any]]]):
         print("Starting training...")
         self.model.train()
         if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
@@ -233,7 +235,7 @@ class GRPOTrainer(Trainer):
         self.compute_loss(one_batch_generation_outputs)
         return 0
 
-    def generate(self, inputs: dict[str, Union[torch.Tensor, Any]], **kwargs):
+    def generate(self, inputs: list[dict[str, Union[torch.Tensor, Any]]], **kwargs):
         print("Starting generation...")
         mode = "train" if self.model.training else "eval"
         if mode == "train":
@@ -246,9 +248,91 @@ class GRPOTrainer(Trainer):
                 # todo: _split_generation_outputs
                 self._buffered_generation = self._split_generation_outputs(shuffled_generation_outputs)
             self.step_in_generation += 1
+            # clear step_in_generation, and do _generate in next step
+            # todo: 是否采用全局变量累加，不清零更好一点
+            if self.step_in_generation == repeat_train_steps_per_generation:
+                self.step_in_generation = 0
             return self._buffered_generation
         else:
             return self._generate(inputs, **kwargs)
+
+    def _generate(self, inputs: list[dict[str, Union[torch.Tensor, Any]]], **kwargs):
+        mode = "train" if self.model.training else "eval"
+        prompts = [x["prompt"] for x in inputs]
+        prompts_text = [maybe_apply_chat_template(x, self.processing_class)["prompt"] for x in inputs]
+        prompt_inputs = self.processing_class(text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False)
+
+        prompt_inputs = super()._prepare_inputs(prompt_inputs)
+
+        prompt_ids = prompt_inputs["input_ids"]
+        prompt_masks = prompt_inputs["attention_mask"]
+
+        # todo: support vLLM
+        with torch.no_grad():
+            prompt_completion_ids = self.model.generate(prompt_ids, attention_mask=prompt_masks)
+
+            origin_prompt_length = prompt_ids.size(1)
+            prompt_ids = prompt_completion_ids[:, :origin_prompt_length]
+            completion_ids = prompt_completion_ids[:, origin_prompt_length:]
+
+            # Mask everything after the first EOS token
+            is_eos = completion_ids == self.processing_class.eos_token_id
+            eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=self.args.device)
+            eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
+            sequence_indices = torch.arange(is_eos.size(1), device=self.args.device).expand(is_eos.size(0), -1)
+            completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+            completion_length = completion_mask.sum(dim=1)
+
+            completion_ids_list = [[id.item() for id, mask in zip(row, mask_row) if mask] for row, mask_row in zip(completion_ids,completion_mask)]
+
+            # if prompt is [today is a nice day, let's] and completion is [go to the beach]
+            # prompt_masks = [1, 1, 1, 1, 1, 1, 1, 1, 0, 0] to make sure length = 10
+            # completion_mask = [1, 1, 1, 1, 0] to make sure length = 5
+            # attention_mask = [1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0] to make sure length = 15
+            attention_mask = torch.cat([prompt_masks, completion_mask], dim=1)
+
+            # compute old_model and ref_model token logps
+            with torch.no_grad():
+                if self.args.generation_repeat_num > 1 or self.args.generation_cover_steps > self.args.gradient_accumulation_steps:
+                    old_per_token_logps = self._get_per_token_logps_and_entropies(
+                    self.model, prompt_completion_ids, attention_mask, self.args.logits_to_keep, self.args.per_device_batch_size
+                )["logps"]
+                else:
+                    old_per_token_logps = None
+                if self.args.use_ref_model is True:
+                    ref_per_token_logps = self._get_per_token_logps_and_entropies(
+                        self.ref_model, prompt_completion_ids, attention_mask, self.args.logits_to_keep, self.args.per_device_batch_size
+                    )["logps"]
+                else:
+                    ref_per_token_logps = None
+
+                rewards_per_rewardfun = self._compute_rewards()
+
+                rewards = (rewards_per_rewardfun * self.args.reward_weights.to(self.args.device).unsqueeze(0)).nansum(dim=1)
+
+
+
+
+
+    def _get_per_token_logps_and_entropies(
+            self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False
+    ) -> dict[str, Optional[torch.Tensor]]:
+        all_log_probs = []
+        for i in range(0, input_ids.size(0), batch_size):
+            batch_input_ids = input_ids[i : i + batch_size]
+            batch_attention_mask = attention_mask[i : i + batch_size]
+            batch_logits = model(batch_input_ids, attention_mask=batch_attention_mask, logits_to_keep=logits_to_keep + 1).logits
+
+            batch_logits = batch_logits[:, :-1, :]
+            batch_logits = batch_logits / self.args.temperature
+
+            log_probs = selective_log_softmax(batch_logits, batch_input_ids[:, -logits_to_keep:])
+
+            all_log_probs.append(log_probs)
+
+        logps = torch.cat(all_log_probs, dim=0)
+        # todo: entropies
+        return {"logps": logps, "entropies": None}
 
     def get_one_batch_from_generation_output(self, generation_outputs):
         mode = "train" if self.model.training else "eval"
@@ -290,3 +374,5 @@ class GRPOTrainer(Trainer):
             shuffle=self.shuffle_dataset,
             seed=self.args.seed,
         )
+
+
