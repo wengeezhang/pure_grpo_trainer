@@ -219,8 +219,12 @@ class GRPOTrainer(Trainer):
                     if will_update_in_this_step:
                         print("Updating model...")
                         self.optimizer.step()
-                        self.scheduler.step()
                         self.state.global_step += 1
+
+                        self.model.zero_grad()
+                        # todo: resume from checkpoint, skipped steps
+                        self.state.epoch += ((train_step + 1) / total_steps_in_one_epoch)
+                        # todo: evaluate and metrics
 
     def _do_train_step(self, inputs: list[dict[str, Union[torch.Tensor, Any]]]):
         print("Starting training...")
