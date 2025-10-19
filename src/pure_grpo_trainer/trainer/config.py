@@ -59,6 +59,14 @@ class GRPOConfig(TrainingArguments):
             )
         }
     )
+    kl_coef: Optional[float] = field(
+        default=0.0,
+        metadata={
+            "help": (
+                "The coefficient of the KL loss. "
+            )
+        }
+    )
     self_as_ref_model: Optional[bool] = field(
         default=False,
         metadata={
@@ -111,6 +119,30 @@ class GRPOConfig(TrainingArguments):
             "help": (
                 "The checkpoint strategy. "
                 "e.g. ['new_best_eval', 'epochs']"
+            )
+        }
+    )
+    scale_rewards: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to scale the rewards. "
+            )
+        }
+    )
+    cliprange_low_value: Optional[float] = field(
+        default=0.2,
+        metadata={
+            "help": (
+                "The low value of the cliprange. "
+            )
+        }
+    )
+    cliprange_high_value: Optional[float] = field(
+        default=0.2,
+        metadata={
+            "help": (
+                "The high value of the cliprange. "
             )
         }
     )

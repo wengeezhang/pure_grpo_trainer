@@ -218,6 +218,9 @@ class GRPOTrainer(Trainer):
                     train_total_loss = train_total_loss + train_step_loss
                     if will_update_in_this_step:
                         print("Updating model...")
+                        self.optimizer.step()
+                        self.scheduler.step()
+                        self.state.global_step += 1
 
     def _do_train_step(self, inputs: list[dict[str, Union[torch.Tensor, Any]]]):
         print("Starting training...")
@@ -310,9 +313,27 @@ class GRPOTrainer(Trainer):
 
                 rewards = (rewards_per_rewardfun * self.args.reward_weights.to(self.args.device).unsqueeze(0)).nansum(dim=1)
 
+                deduplicated_group_rewards_mean = rewards.view(-1, self.args.generation_cover_steps).mean(dim=1)
+                deduplicated_group_rewards_std = rewards.view(-1, self.args.generation_cover_steps).std(dim=1)
 
+                duplicated_group_rewards_mean = deduplicated_group_rewards_mean.repeat_interleave(self.args.generation_cover_steps, dim=0)
+                duplicated_group_rewards_std = deduplicated_group_rewards_std.repeat_interleave(self.args.generation_cover_steps, dim=0)
 
+                advantages = rewards - duplicated_group_rewards_mean
+                if self.args.scale_rewards:
+                    advantages = advantages / (deduplicated_group_rewards_std + 1e-8)
 
+                # todo: process slice
+
+                return {
+                    "prompt_ids": prompt_ids,
+                    "prompt_mask": prompt_masks,
+                    "completion_ids": completion_ids,
+                    "completion_mask": completion_mask,
+                    "advantages": advantages,
+                    "old_per_token_logps": old_per_token_logps,
+                    "ref_per_token_logps": ref_per_token_logps,
+                }
 
     def _get_per_token_logps_and_entropies(
             self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False
@@ -341,8 +362,36 @@ class GRPOTrainer(Trainer):
             return generation_output
         else:
             return generation_outputs
+
     def compute_loss(self, inputs: dict[str, Union[torch.Tensor, Any]], **kwargs):
-        print("Starting generation...")
+        print("Starting compute_loss...")
+        prompt_completion_ids = torch.cat([inputs["prompt_ids"], inputs["completion_ids"]], dim=0)
+        attention_mask = torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=0)
+        logits_to_keep = inputs["completion_ids"].size(1)
+
+        # todo: entropy threshold mask
+        per_token_logps = self._get_per_token_logps_and_entropies(
+            self.model, prompt_completion_ids, attention_mask, logits_to_keep, self.args.per_device_batch_size
+        )["logps"]
+
+        if self.args.use_ref_model is True:
+            diff_with_ref = inputs["ref_per_token_logps"] - per_token_logps
+            per_token_kl_with_ref = (torch.exp(diff_with_ref) - diff_with_ref - 1)
+
+        # compute ratio based on: exp(log(π_new(a|s)) - log(π_old(a|s))) = π_new(a|s)/π_old(a|s)
+        ratio = torch.exp(per_token_logps - inputs["old_per_token_logps"])
+        clamped_ratio = torch.clamp(ratio, 1 - self.args.cliprange_low_value, 1 + self.args.cliprange_high_value)
+
+        per_token_loss = torch.min(
+            ratio * inputs["advantages"].unsqueeze(1),
+            clamped_ratio * inputs["advantages"].unsqueeze(1),
+        )
+
+        if self.args.use_ref_model is True:
+            per_token_loss = per_token_loss + per_token_kl_with_ref * self.args.kl_coef
+
+        loss = ((per_token_loss * inputs["completion_mask"]).sum(-1) / inputs["completion_mask"].sum(-1).clamp(min=1.0)).mean()
+        return loss
 
     def get_train_dataloader(
             self,
